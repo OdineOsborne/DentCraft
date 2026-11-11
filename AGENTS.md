@@ -103,7 +103,7 @@ library files) are not read.
   `DENTCRAFT_TOOTH_LIBRARY=F:/Ai/DentCraft/scratch/tooth-library-mod` to design from the library.
 - Check release binaries with `python -I scripts/check-windows-exe.py <exe>`.
 
-## State and next work (2026-11-01)
+## State and next work (2026-11-11)
 
 Done on main: real-scan margins, inner surface and crowns (full arch 17/24, plaster model 4/4,
 bridge case 1/2, canine demo); floating toolbar, view cluster, Objects panel with design parts and
@@ -114,17 +114,11 @@ scoped actions, and undoable copying of step settings to other/selected teeth wh
 placement; library dimensions preserved with rigid seating and local cervical adaptation.
 The owner approved publishing 0.2.1 on 2026-11-04. Future releases still require owner approval.
 
-Next, in order:
-
-1. **Tooth 35 with the library hangs** in `build_crown` (`crates/dentcraft-design/src/crown.rs`)
-   past 180 s; 45 is its mirror and works. Find the non-terminating loop; add a bound.
-2. **Library teeth 13, 16, 33 fall back** to parametric ("folds or intersects"): make the fit
-   follow them (`anatomy_step.rs::fit`, `user_library.rs::repair_radial`).
-3. **Parametric failures on real cases**: 11/21, 11/24, 03/37 offset edge inversion in
-   `offset_margin` (drop inverted offset edges, intersect the neighbours' offset lines, report the
-   azimuth); 11/44 placed template not radially single-valued; 11/46 margin not star-shaped about
-   the vertex centroid (try the area centroid); 11/26 and 01/16 margin detection.
-4. Roadmap 0.3: quality checks before export, then the design report (see ROADMAP.md).
+Next work: follow [docs/plan.md](docs/plan.md), in its order: Phase 0 scoreboard, Phase 1
+reference study (behaviour and UI of exocad and Atomica only: no decompiled code, no proprietary
+formats), Phase 2 single crown always finishes, Phase 3 clear design, Phase 4 bridges and pontics,
+Phase 5 quality checks and 0.3. Quote the scoreboard (`scratch/tools/scoreboard.sh <exe>`) before
+and after every task; no task may lower it.
 
 Commit each verified change on a branch with a clear message; merge to main only when the
 verification command is green, and leave publishing a release to the owner.
