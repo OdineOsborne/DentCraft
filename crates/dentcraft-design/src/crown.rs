@@ -33,8 +33,9 @@ pub struct CrownPlacement {
 /// ledge must not exceed either full thickness.
 #[derive(Clone, Copy, Debug)]
 pub struct CrownParams {
-    /// Perpendicular, mitred margin offset, default 0.08 mm. An inverted
-    /// offset edge or insufficient true 3D clearance returns an error.
+    /// Perpendicular, mitred margin offset, default 0.08 mm. Concave bends
+    /// smaller than the ledge are bridged; a sharper outline or insufficient
+    /// true 3D clearance returns an error.
     pub margin_thickness: f64,
     pub min_occlusal: f64,
     pub min_wall: f64,
@@ -493,10 +494,17 @@ type AngleLoop = Vec<(f64, u32)>;
 /// outward edge normals by `t·(n_a + n_b)/(1 + n_a·n_b)`, which shifts both
 /// edges by exactly `thickness` — no radial cap or per-corner allowance. The
 /// intaglio projects inside the margin polygon, so every loop point keeps a
-/// true 3D clearance of at least `thickness` without iteration. An offset edge
-/// that inverts (the outline turns too sharply for the ledge), a non-star-shaped
-/// offset loop, or a lost perpendicular clearance returns an error instead of a
-/// thin crown. Returns the loop and its angle-sorted vertex indices.
+/// true 3D clearance of at least `thickness` without iteration.
+///
+/// A concave bend smaller than the ledge (scan zig-zag) inverts its offset
+/// edge. Such edges are dropped one at a time, most inverted first, and their
+/// neighbours' offset lines joined, until no offset edge inverts; the ledge is
+/// then a little wider over the bend. A joined run may span at most
+/// `2·thickness` of margin, so a sharp turn on long edges still returns an
+/// error, as do a non-star-shaped offset loop and a lost perpendicular
+/// clearance, instead of a thin crown. Returns the loop, which has one vertex
+/// per kept margin edge (one per margin vertex when nothing inverts), and its
+/// angle-sorted vertex indices.
 fn offset_margin(
     margin: &[DVec3],
     polar: Polar,
@@ -509,35 +517,79 @@ fn offset_margin(
     let pts: Vec<DVec2> = margin.iter().map(|&p| flat(p)).collect();
     let reject = || DesignError::UnsupportedMarginOffset { thickness };
     let n = pts.len();
-    let mut offset2d = Vec::with_capacity(n);
+    // Outward unit normal of margin edge i, from vertex i to vertex i + 1.
+    let mut normals = Vec::with_capacity(n);
     for i in 0..n {
-        let (previous, point, next) = (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
-        let outward = |a: DVec2, b: DVec2| {
-            let e = b - a;
-            let l = e.length();
-            (l > 1e-12).then(|| DVec2::new(e.y, -e.x) / l)
-        };
-        let (Some(na), Some(nb)) = (outward(previous, point), outward(point, next)) else {
-            return Err(reject());
-        };
-        let denominator = 1.0 + na.dot(nb);
-        if denominator < 1e-9 {
+        let e = pts[(i + 1) % n] - pts[i];
+        let l = e.length();
+        if l <= 1e-12 {
             return Err(reject());
         }
-        offset2d.push(point + (na + nb) * (thickness / denominator));
+        normals.push(DVec2::new(e.y, -e.x) / l);
     }
-    for i in 0..n {
-        let j = (i + 1) % n;
-        if (offset2d[j] - offset2d[i]).dot(pts[j] - pts[i]) <= 0.0 {
+    // Where the offset lines of kept edge `a` and the next kept edge `b` meet:
+    // the mitre at their shared vertex, or across the dropped edges between.
+    let corner = |a: usize, b: usize| {
+        if b == (a + 1) % n {
+            let denominator = 1.0 + normals[a].dot(normals[b]);
+            return (denominator >= 1e-9)
+                .then(|| pts[b] + (normals[a] + normals[b]) * (thickness / denominator));
+        }
+        let (start_a, start_b) = (
+            pts[a] + normals[a] * thickness,
+            pts[b] + normals[b] * thickness,
+        );
+        let (direction_a, direction_b) = (normals[a].perp(), normals[b].perp());
+        let cross = direction_a.perp_dot(direction_b);
+        (cross.abs() >= 1e-9)
+            .then(|| start_a + direction_a * ((start_b - start_a).perp_dot(direction_b) / cross))
+    };
+    let mut kept: Vec<usize> = (0..n).collect();
+    let offset2d = loop {
+        let m = kept.len();
+        if m < 3 {
             return Err(reject());
         }
-    }
-    // The 3D loop keeps each margin vertex's axial coordinate; only the
-    // perpendicular component is offset.
-    let offset3d: Vec<_> = offset2d
-        .iter()
-        .zip(margin)
-        .map(|(&q, &p)| p + polar.x * (q - flat(p)).x + polar.y * (q - flat(p)).y)
+        let corners = (0..m)
+            .map(|k| corner(kept[(k + m - 1) % m], kept[k]))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(reject)?;
+        // Signed length of each kept edge's offset along its margin edge.
+        let (worst, along) = (0..m)
+            .map(|k| {
+                (
+                    k,
+                    (corners[(k + 1) % m] - corners[k]).dot(normals[kept[k]].perp()),
+                )
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        if along > 0.0 {
+            break corners;
+        }
+        kept.remove(worst);
+        // The joined run must stay a bend smaller than the ledge.
+        let m = kept.len();
+        let k = worst % m;
+        let (a, b) = (kept[(k + m - 1) % m], kept[k]);
+        let run: f64 = (1..(b + n - a) % n)
+            .map(|s| pts[(a + s + 1) % n].distance(pts[(a + s) % n]))
+            .sum();
+        if run > 2.0 * thickness {
+            return Err(reject());
+        }
+    };
+    // The 3D loop keeps the axial coordinate of the margin vertex it offsets
+    // (the mean over a joined run); only the perpendicular component moves.
+    let m = kept.len();
+    let offset3d: Vec<_> = (0..m)
+        .map(|k| {
+            let (a, b) = (kept[(k + m - 1) % m], kept[k]);
+            let count = (b + n - a - 1) % n + 1;
+            let p = (1..=count).map(|s| margin[(a + s) % n]).sum::<DVec3>() / count as f64;
+            let shift = offset2d[k] - flat(p);
+            p + polar.x * shift.x + polar.y * shift.y
+        })
         .collect();
     // Star-shaped about the polar origin, with no angular gap of π or more:
     // every template ray then meets the loop exactly once.
@@ -564,8 +616,8 @@ fn offset_margin(
             })
             .fold(f64::INFINITY, f64::min)
     };
-    for i in 0..n {
-        let j = (i + 1) % n;
+    for i in 0..m {
+        let j = (i + 1) % m;
         if line_distance(offset2d[i]).min(line_distance((offset2d[i] + offset2d[j]) * 0.5))
             < thickness - 1e-9
         {
@@ -1878,6 +1930,41 @@ mod tests {
         let placement = auto_placement(&inner, &template, &cervical, die.axis, None);
         let crown = build_crown(&inner, &template, &cervical, placement, &params)
             .unwrap_or_else(|e| panic!("superellipse margin: {e:?}"));
+        verify(&crown, &inner, &die, &params);
+    }
+
+    /// Real-scan regression (case 11 teeth 21 and 24, case 03 tooth 37): a
+    /// smoothed margin can keep a concave zig-zag smaller than the 0.08 mm
+    /// ledge. A 0.03 mm deep, 0.06 mm wide notch turns 90° on 0.042 mm walls,
+    /// so both mitred wall offsets invert; the ledge must bridge the notch
+    /// instead of rejecting the outline.
+    #[test]
+    fn concave_zigzag_below_ledge_builds() {
+        let mut die = prepared_stump(&StumpParams {
+            segments: 192,
+            ..Default::default()
+        })
+        .unwrap();
+        let n = die.margin.len();
+        let i = n / 3;
+        let bottom = die.margin[i];
+        let radial = DVec3::new(bottom.x, bottom.y, 0.0).normalize();
+        let mut notched = die.margin.clone();
+        for j in [i - 1, i + 1] {
+            notched[j] = bottom + (die.margin[j] - bottom).normalize() * 0.03;
+        }
+        notched[i] = bottom - radial * 0.03;
+        for (old, new) in die.margin.iter().zip(&notched) {
+            let index = die.mesh.positions.iter().position(|p| p == old).unwrap();
+            die.mesh.positions[index] = *new;
+        }
+        die.margin = notched;
+        let inner = intaglio(&die, 0.05);
+        let (template, cervical) = crown_template(4.0, 5.5, 64, 18).unwrap();
+        let params = CrownParams::default();
+        let placement = auto_placement(&inner, &template, &cervical, die.axis, None);
+        let crown = build_crown(&inner, &template, &cervical, placement, &params)
+            .unwrap_or_else(|e| panic!("zig-zag margin: {e:?}"));
         verify(&crown, &inner, &die, &params);
     }
 
