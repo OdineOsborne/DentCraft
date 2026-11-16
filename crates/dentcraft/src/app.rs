@@ -820,6 +820,10 @@ impl DentCraftApp {
                 self.margin.finish_trace();
                 return;
             }
+            StepAction::UndoPoint => {
+                self.margin.undo_point();
+                return;
+            }
             StepAction::CancelTrace => {
                 self.margin.cancel_trace();
                 return;
@@ -1084,6 +1088,14 @@ impl DentCraftApp {
     }
 
     fn undo(&mut self) {
+        // While a margin is traced by hand, Undo takes back its last point.
+        let tracing = self
+            .session
+            .current()
+            .is_some_and(|s| s.id == StepId::Margin);
+        if tracing && self.margin.undo_point() {
+            return;
+        }
         self.history.undo(&mut self.case.design);
     }
 
@@ -2098,6 +2110,7 @@ impl DentCraftApp {
                     anatomy.filter(|&i| steps[i].teeth.contains(&tooth))
                 })
             });
+        let needs_trace = self.margin.needs_trace();
         let action = WorkflowView {
             session: &self.session,
             case: &self.case,
@@ -2105,6 +2118,7 @@ impl DentCraftApp {
             error: self.workflow_error.as_deref(),
             tooth: self.tooth,
             margin: self.tooth.map(|t| self.margin.card(t)),
+            needs_trace: &needs_trace,
             orient: Some(self.orient.card(self.case.design.jaw_frame.is_some())),
             axis: self
                 .tooth

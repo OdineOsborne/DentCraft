@@ -14,6 +14,7 @@ use crate::contacts_step::{
     ContactParam, ContactsCard, MAP_MAX_MM, MAP_MIN_MM, NO_ANTAGONIST, THIN_WARNING, distance_color,
 };
 use crate::export_step::{ExportCard, format_bytes};
+use crate::i18n::tr;
 use crate::inner_step::InnerParam;
 use crate::theme::{Palette, RADIUS_SM, SIZE_SMALL};
 use crate::widgets::{self, Icon, paint_icon, small_button};
@@ -43,6 +44,8 @@ pub enum StepAction {
     TraceByHand,
     /// Store the hand-traced margin.
     FinishTrace,
+    /// Remove the last waypoint of the hand trace.
+    UndoPoint,
     /// Drop the hand-traced margin in progress.
     CancelTrace,
     /// Find the jaw's occlusal plane and midline.
@@ -179,6 +182,10 @@ pub struct MarginCard {
     pub waypoints: Option<usize>,
     /// A hand-traced margin is ready to be stored.
     pub can_finish: bool,
+    /// What to do next, such as tracing by hand after detection failed (not an error).
+    pub note: Option<String>,
+    /// A waypoint of the hand trace can be removed with Undo.
+    pub can_undo_point: bool,
 }
 
 /// Hint shown while the margin is traced by hand.
@@ -213,6 +220,8 @@ pub struct WorkflowView<'a> {
     pub tooth: Option<Fdi>,
     /// The Margin step's card, when that step is active.
     pub margin: Option<MarginCard>,
+    /// Teeth whose margin detection failed and that wait for a hand trace.
+    pub needs_trace: &'a [Fdi],
     /// The Orientation step's card, when that step is active.
     pub orient: Option<OrientCard>,
     /// The Insertion axis step's card, when that step is active.
@@ -353,6 +362,8 @@ struct ChipMark {
     done: bool,
     /// A click picks the tooth.
     clickable: bool,
+    /// Margin detection failed on this tooth and it waits for a hand trace.
+    needs_trace: bool,
 }
 
 /// Whether the step has per-tooth tools, so its chips pick the tooth to work on.
@@ -373,9 +384,11 @@ fn chip_mark(
     tooth: Fdi,
     case: &Case,
     current: Option<Fdi>,
+    needs_trace: &[Fdi],
 ) -> ChipMark {
     let tools = has_tooth_tools(id);
     ChipMark {
+        needs_trace: id == StepId::Margin && needs_trace.contains(&tooth),
         current: tools && status == StepStatus::Active && current == Some(tooth),
         done: case.design.teeth.get(&tooth).is_some_and(|d| match id {
             StepId::Margin => d.margin.is_some(),
@@ -413,11 +426,13 @@ fn tooth_chip(ui: &mut Ui, tooth: Fdi, case: &Case, mark: ChipMark, p: &Palette)
     let (rect, mut response) = ui.allocate_exact_size(size, sense);
     let radius = CornerRadius::same(RADIUS_SM);
     ui.painter().rect_filled(rect, radius, tint);
-    if mark.current {
+    if mark.current || mark.needs_trace {
+        // A tooth waiting for its hand trace is ringed in the warning colour.
+        let colour = if mark.needs_trace { p.danger } else { p.accent };
         ui.painter().rect_stroke(
             rect.expand(1.5),
             radius,
-            Stroke::new(1.5, p.accent),
+            Stroke::new(1.5, colour),
             egui::StrokeKind::Outside,
         );
     }
@@ -431,7 +446,13 @@ fn tooth_chip(ui: &mut Ui, tooth: Fdi, case: &Case, mark: ChipMark, p: &Palette)
         paint_icon(ui.painter(), Icon::Check, at, ink);
     }
     if let Some(unit) = case.unit(tooth) {
-        let done = if mark.done { " · margin done" } else { "" };
+        let done = if mark.done {
+            " · margin done".to_owned()
+        } else if mark.needs_trace {
+            format!(" · {}", tr!("margin-needs-trace"))
+        } else {
+            String::new()
+        };
         response = response.on_hover_text(format!("{tooth} · {}{done}", unit.kind.label()));
     }
     mark.clickable && response.on_hover_cursor(CursorIcon::PointingHand).clicked()
@@ -463,7 +484,14 @@ fn active_card(
             ui.label(RichText::new("Teeth").size(SIZE_SMALL).color(p.text_dim));
             ui.add_space(2.0);
             for &tooth in teeth {
-                let mark = chip_mark(id, StepStatus::Active, tooth, view.case, view.tooth);
+                let mark = chip_mark(
+                    id,
+                    StepStatus::Active,
+                    tooth,
+                    view.case,
+                    view.tooth,
+                    view.needs_trace,
+                );
                 if tooth_chip(ui, tooth, view.case, mark, p) {
                     action = Some(StepAction::Tooth(index, tooth));
                 }
@@ -615,7 +643,12 @@ fn margin_section(ui: &mut Ui, card: &MarginCard, case: &Case, p: &Palette) -> O
             } else {
                 MARGIN_HINT
             };
-            ui.label(RichText::new(hint).size(SIZE_SMALL).color(p.text_dim));
+            if let Some(note) = &card.note {
+                // Detection failed: the one sentence on what to do replaces the hint.
+                ui.label(RichText::new(note).size(SIZE_SMALL).color(p.text).strong());
+            } else {
+                ui.label(RichText::new(hint).size(SIZE_SMALL).color(p.text_dim));
+            }
             if let Some(error) = &card.error {
                 ui.label(RichText::new(error).size(SIZE_SMALL).color(p.danger));
             }
@@ -630,11 +663,17 @@ fn margin_section(ui: &mut Ui, card: &MarginCard, case: &Case, p: &Palette) -> O
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if card.waypoints.is_some() {
-                    if small_button(ui, "Done", card.can_finish, true)
-                        .on_hover_text("Store the traced margin (Enter)")
+                    if small_button(ui, &tr!("margin-close"), card.can_finish, true)
+                        .on_hover_text(tr!("margin-close-tip"))
                         .clicked()
                     {
                         action = Some(StepAction::FinishTrace);
+                    }
+                    if small_button(ui, &tr!("margin-undo-point"), card.can_undo_point, false)
+                        .on_hover_text(tr!("margin-undo-point-tip"))
+                        .clicked()
+                    {
+                        action = Some(StepAction::UndoPoint);
                     }
                     if small_button(ui, "Cancel", true, false)
                         .on_hover_text("Drop the trace (Escape)")
@@ -1512,6 +1551,7 @@ mod tests {
                             error: Some(&error),
                             tooth: None,
                             margin: None,
+                            needs_trace: &[],
                             orient: None,
                             axis: None,
                             inner: None,

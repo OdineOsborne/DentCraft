@@ -105,3 +105,12 @@ role-upper-pre-op = Upper jaw (pre-op)
 role-lower-pre-op = Lower jaw (pre-op)
 role-bite = Bite registration
 role-other = Other
+
+## Margin step
+
+margin-trace-note = Couldn't find the margin automatically: click points along the finish line around the tooth, then click the first point or Close margin.
+margin-needs-trace = needs your trace
+margin-close = Close margin
+margin-close-tip = Close the loop and store the traced margin (Enter)
+margin-undo-point = Undo point
+margin-undo-point-tip = Remove the last point (Ctrl+Z)

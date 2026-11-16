@@ -102,3 +102,12 @@ role-upper-pre-op = Arcada superior (preoperatoria)
 role-lower-pre-op = Arcada inferior (preoperatoria)
 role-bite = Registro de mordida
 role-other = Otro
+
+## Margin step
+
+margin-trace-note = No se encontró el margen automáticamente: haz clic en puntos a lo largo de la línea de terminación alrededor del diente y luego en el primer punto o en Cerrar margen.
+margin-needs-trace = necesita tu trazado
+margin-close = Cerrar margen
+margin-close-tip = Cerrar el contorno y guardar el margen trazado (Intro)
+margin-undo-point = Deshacer punto
+margin-undo-point-tip = Quitar el último punto (Ctrl+Z)
