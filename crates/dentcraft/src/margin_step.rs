@@ -605,6 +605,8 @@ pub struct MarginStep {
     needs_trace: HashMap<Fdi, Vec<DVec3>>,
     /// What to do next, shown in the step (not an error).
     note: Option<String>,
+    /// Teeth with a `--margin-points` trace on its way, stored as soon as it is traced.
+    scripted: std::collections::HashSet<Fdi>,
     next_group: u64,
     /// The open drag's group, and whether the drag has ended.
     drag: Option<(EditGroup, bool)>,
@@ -628,6 +630,7 @@ impl MarginStep {
             fallback: HashMap::new(),
             needs_trace: HashMap::new(),
             note: None,
+            scripted: Default::default(),
             next_group: 1,
             drag: None,
             error: None,
@@ -721,9 +724,10 @@ impl MarginStep {
             let mut s = self.shared.borrow_mut();
             s.tooth = Some(tooth);
             s.waypoints = points.clone();
-            // A scripted trace has nobody to press Close margin: store it once traced.
-            s.finish_requested = true;
         }
+        // A scripted trace has nobody to close it, and the run may leave the Margin step before
+        // it is traced: it is stored as soon as it is.
+        self.scripted.insert(tooth);
         self.synced.0 = Some(tooth);
         self.push(Job {
             tooth,
@@ -961,6 +965,22 @@ impl MarginStep {
         design: &mut Design,
         history: &mut History,
     ) {
+        if job.edit == Edit::Manual && self.scripted.remove(&job.tooth) {
+            match result {
+                Ok(m) if m.points.len() >= 3 => {
+                    let label = Edit::Manual.label(job.tooth);
+                    set_margin(design, history, job.tooth, Some(m.points), &label, None);
+                    self.needs_trace.remove(&job.tooth);
+                    let mut s = self.shared.borrow_mut();
+                    if s.tooth == Some(job.tooth) {
+                        s.leave_manual(Mode::Edit);
+                    }
+                }
+                Ok(_) => self.error = Some("No margin found there".to_owned()),
+                Err(e) => self.error = Some(e),
+            }
+            return;
+        }
         if job.edit == Edit::Manual {
             // A preview of the hand-traced loop; Done stores it.
             let mut s = self.shared.borrow_mut();
@@ -1729,6 +1749,20 @@ mod tests {
         );
         assert_eq!(step.shared.borrow().mode, Mode::Manual);
         assert!(step.shared.borrow().waypoints.len() >= 3);
+    }
+
+    #[test]
+    fn a_scripted_trace_is_stored_even_after_the_step_is_left() {
+        let mut design = Design::default();
+        let mut history = History::default();
+        let mut step = MarginStep::new(None);
+        step.trace_points(t(33), MeshId(1), ring(4.0, 6));
+        // The run moves on to another step: the Margin step has no tooth any more.
+        step.sync(&design, None);
+        let traced = job(JobKind::Trace(ring(4.0, 6)), Edit::Manual);
+        step.finish(traced, margin_of(ring(4.0, 40)), &mut design, &mut history);
+        assert_eq!(design.teeth[&t(33)].margin, Some(ring(4.0, 40)));
+        assert_eq!(history.undo_label(), Some("Trace margin 33"));
     }
 
     #[test]
